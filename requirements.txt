@@ -1,0 +1,5 @@
+six>=1.0
+requests>=2.0
+console>=0.9
+openpyxl>=2.6
+beautifulsoup4>=4.8
