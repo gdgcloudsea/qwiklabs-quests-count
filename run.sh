@@ -1,3 +1,5 @@
+#!/bin/bash
+
 if [ -d venv ]; then
     echo "Activate virtual env"
     source venv/bin/activate

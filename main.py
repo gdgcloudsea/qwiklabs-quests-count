@@ -1,6 +1,9 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*- 
+
 #
 # GDG - Online Cloud Study Jams Vietnam - Quests Counter
-# Author: VietKubers team
+# Author: GDG Cloud Hanoi
 # Date: Aug 29, 2019
 #
 
