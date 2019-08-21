@@ -4,69 +4,97 @@
 # Date: Aug 29, 2019
 #
 
+import argparse
 import datetime
 import io
-import os
-import pprint
 import random
 import shutil
-import six
-import sys
 
 import bs4
-from console import fg, bg, fx, defx  # shortcut: sc
+from console import fg, bg, fx, defx
 import openpyxl
 import requests
 
+PROG_NAME = 'GDG Quest Counter'
 DEBUG = False
-COUNT_TOP_PEOPLE_ONLY = 5 if DEBUG else 0
+COLORED_MODE = True
 
-INPUT_FILE = None
-INPUT_DATA = {
-    'doers': {},
+DATA = {
+    'input_file': None,
+    'participants': {},
     'result': {
-        'ok': None,
         'error': None,
-    },
-    'excel': {
-        'workbook': None,
-        'worksheet': None,
+        'rank_by_location': {},
+        'rank_by_timestamp': {},
     },
 }
 
-GDOCS_FILE_ID = '1VE2sH6zePhdwaSDir9ucUoXPYTXIjIR3eRFKQ-IVZcw'
-GDOCS_SHEET_ID = '241580121'
-GDOCS_DOWNLOAD_LINK = 'https://docs.google.com/feeds/download/spreadsheets/Export?key=%(file_id)s&exportFormat=xlsx&gid=%(sheet_id)s'
+FILTER = {
+    'skip_quests': ['GCP Essentials'],
+    'date_range': [datetime.date(2019, 7, 28), datetime.date(2019, 8, 30)],
+    'location': {
+        'hanoi': {
+            'title': 'Hà Nội',
+            'names': ['hanoi', 'ha noi', 'hà nội'],
+        },
+        'danang': {
+            'title': 'Đà Nẵng',
+            'names': ['danang', 'da nang', 'đà nẵng'],
+        },
+        'hcm': {
+            'title': 'Hồ Chí Minh City',
+            'names': ['hcm', 'ho chi minh', 'hồ chí minh', 'thành phố hồ chí minh'],
+        },
+    }
+}
 
-COL_RESULT_QUEST_COUNT = 'J'
-COL_RESULT_ALL = 'K'
-COL_RESULT_HANOI = 'L'
-COL_RESULT_DANANG = 'M'
-COL_RESULT_HCM = 'N'
+OPTIONS = {
+    'show_quest_detail': True,
+    'process_top_people_only': 5,  # For testing only
+    'hidden_email': True,
+}
 
-# Colors
+GDOCS_URL = {
+    'file_id': '1VE2sH6zePhdwaSDir9ucUoXPYTXIjIR3eRFKQ-IVZcw',
+    'sheet_id': '241580121',
+    'format': 'xlsx',
+    'template': 'https://docs.google.com/feeds/download/spreadsheets/Export' +
+                '?key=%(file_id)s&exportFormat=%(format)s&gid=%(sheet_id)s',
+}
+
+DATE_FORMAT = '%b %d, %Y'
+INDENT_LV1 = '    '
+INDENT_LV2 = INDENT_LV1 + INDENT_LV1
+
+STYLE_ERR = bg.lightred + fg.white
+STYLE_WARN = bg.lightyellow + fg.blue
+STYLE_INFO = bg.lightwhite + fg.black
+
+STYLE_RANK_HEADER = bg.magenta + fg.white
+STYLE_RANK_ACTIVE = bg.lightgreen + fg.blue
+STYLE_RANK = bg.lightcyan + fg.blue
+STYLE_RANK_INFO = bg.lightwhite + fg.black
+
+# Styles
+EOL = '\n'
 COLOR_ALL = [ 'black', 'red', 'green', 'yellow', 'blue', 'magenta',
               'cyan', 'white', 'lightblack', 'lightred',
               'lightgreen', 'lightyellow', 'lightblue', 'lightmagenta',
               'lightcyan', 'lightwhite' ]
 
-MAX_LINE_LEN = int(shutil.get_terminal_size(fallback=(80, 30))[0] * 0.8)
+TERM_SIZE = shutil.get_terminal_size(fallback=(80, 30))
 
-SHOW_QUESTS_DETAIL = True
-QUEST_COUNT_FROM = [datetime.date(2019, 7, 28), datetime.date(2019, 8, 30)]
-SKIP_QUESTS = ['GCP Essentials']
-
-
-def pp(*args):
+def cc(text, color):
+    return color + text + fx.end if COLORED_MODE else text
+    
+def prt(*args):
     print(*args)
     
-def pp_err(*args):
-    pp()
-    pp(bg.lightred + fg.white + fx.bold, 'ERROR', fx.end, *args)
+def prt_err(*args):
+    prt(EOL, cc('ERROR', STYLE_ERR), *args)
     
-def pp_warn(*args):
-    pp()
-    pp(bg.lightyellow + fg.blue + fx.bold, 'WARNING', fx.end, *args)
+def prt_warn(*args):
+    prt(EOL, cc('WARNING', STYLE_WARN), *args)
     
 def random_bg():
     while True:
@@ -82,52 +110,74 @@ def random_fg(bg=None):
         if not bg or not (color.endswith(bg) or bg.endswith(color)):
             return color
 
+def parse_args():
+    parser = argparse.ArgumentParser(prog=PROG_NAME)
+    parser.add_argument('--debug', action='store_true',
+        default=False,
+        help='DEBUG mode')
+    parser.add_argument('--no-color', dest='color_mode', action='store_false',
+        default=True,
+        help='NO COLOR mode')
+    parser.add_argument('-i', '--input-file', dest='input_file',
+        help='Input file of participants info (must be an Excel file)')
+    parser.add_argument('--start-date', dest='start_date',
+        default=datetime.datetime.strftime(FILTER['date_range'][0], '%Y-%m-%d'),
+        help='Start date of quests to count (YYYY-MM-DD or none)')
+    parser.add_argument('--end-date', dest='end_date',
+        default=datetime.datetime.strftime(FILTER['date_range'][1], '%Y-%m-%d'),
+        help='End date of quests to count (YYYY-MM-DD or none)')
+    return parser.parse_args()
+
 def main():
+    global DEBUG, COLORED_MODE
+    
     # Parse args
-    global INPUT_FILE
-    arg_1st = sys.argv[1] if len(sys.argv) > 1 else None
-    if arg_1st:
-        if arg_1st in ('--help', '-h', '?'):
-            usage()
-            return
-        else:
-            INPUT_FILE = arg_1st
-    # Try download input file
-    if not INPUT_FILE:
-        download_input()
+    args = parse_args()
+    DEBUG = args.debug
+    COLORED_MODE = args.color_mode
+    
+    # Date range of quests
+    date_range = FILTER['date_range']
+    start_date = args.start_date
+    if start_date.lower() == 'none':
+        date_range[0] = None
+    else:
+        date_range[0] = datetime.datetime.strptime(start_date, '%Y-%m-%d').date()
+    end_date = args.end_date
+    if end_date.lower() == 'none':
+        date_range[1] = None
+    else:
+        date_range[1] = datetime.datetime.strptime(end_date, '%Y-%m-%d').date()
+    
+    # Input file
+    input_file = args.input_file or download_input()
+    DATA['input_file'] = input_file
+    
     # Parse input
-    parse_input(INPUT_FILE)
+    parse_input(input_file)
     # Process input
     count_quests()
     
-def usage():
-    pp(fg.blue + bg.lightpurple + fx.bold + fx.frame,
-       'GDG Quest Counter', fx.end)
-    pp(fg.green, '  Usage: run.sh [Input (EXCEL xlsx file)]', fx.end)
-
 def download_input():
-    pp()
-    pp(bg.lightyellow + fg.blue + fx.bold, 'DOWNLOADING GOOGLE DOCS FILE ...', fx.end)
-    pp()
+    prt(EOL,
+        cc('DOWNLOADING GDOCS INPUT FILE ...', STYLE_INFO),
+        EOL)
     
-    filepath = 'result.xlsx'
-    url = GDOCS_DOWNLOAD_LINK % {'file_id': GDOCS_FILE_ID, 'sheet_id': GDOCS_SHEET_ID}
+    filepath = 'result.%(format)s' % GDOCS_URL
+    url = GDOCS_URL['template'] % GDOCS_URL
     req = requests.get(url)
     
     with open(filepath, 'w+b') as file:
         file.write(req.content)
     
-    pp('      Input file saved into', fg.cyan + filepath + fx.end)
-    pp()
-    
-    global INPUT_FILE
-    INPUT_FILE = filepath
+    prt(INDENT_LV1 + 'Input file saved to', cc(filepath, fg.cyan), EOL)
+    return filepath
 
 def parse_input(input):
     wb = openpyxl.load_workbook(filename=input)
-    sh = wb['Results']
+    sh = wb[wb.sheetnames[0]]
     
-    doers = INPUT_DATA['doers']
+    participants = DATA['participants']
     rows_not_processed = []
     
     row_id = 0
@@ -151,39 +201,39 @@ def parse_input(input):
                 'legal_quests': [],
             }
             email = person['email']
-            if email in doers:
-                # Duplicated doer
-                pp_warn('Dupplicated participant', fg.cyan + email + fx.end)
-            doers[email] = person
+            if email in participants:
+                # Duplicated entry
+                prt_warn('Dupplicated input entry ' + person['email'],
+                         'at row %d' % row_id)
+            participants[email] = person
     
-    if len(rows_not_processed):
-        show_ignored_rows(rows_not_processed)
+    # Unprocessed rows
+    show_unprocessed_rows(rows_not_processed)
         
-    # Save the excel input
-    INPUT_DATA['excel']['workbook'] = wb
-    INPUT_DATA['excel']['worksheet'] = sh
-        
-def show_ignored_rows(rows):
-    # TODO
-    pp('IGNORED ROWS')
+def show_unprocessed_rows(rows):
+    # TODO this should not happen
+    if rows:
+        prt(cc('IGNORED ROWS', STYLE_WARN)+ str(rows))
+        prt(EOL, INDENT_LV1, str(rows))
     
 def count_quests():
-    doers = INPUT_DATA['doers']
+    participants = DATA['participants']
     person_index = 0
-    for person in doers.values():
+    process_only = OPTIONS['process_top_people_only'] if DEBUG else None
+    for person in participants.values():
         try:
             count_quests_of(person)
         except Exception as ex:
-            pp('Unable to parse QUESTS report for user %s' % person['email'])
+            prt('Unable to parse QUESTS report for user %s' % person['email'])
         person_index += 1
         # For testing only
-        if COUNT_TOP_PEOPLE_ONLY and person_index == COUNT_TOP_PEOPLE_ONLY:
+        if process_only and person_index == process_only:
             break
     
     # Track ERROR and OK reports
     error_list = []
     ok_list = []
-    for person in doers.values():
+    for person in participants.values():
         if person.get('error', None):
             error_list.append(person)
         else:
@@ -192,98 +242,96 @@ def count_quests():
     # Sort people by LEGAL quests
     ok_list.sort(key=lambda x: len(x['legal_quests']), reverse=True)
     
-    # Filter and sort result by location
-    hanoi_list = []
-    danang_list = []
-    hcm_list = []
-    unknown_list = []
-    for person in ok_list:
-        loc = person['location'].lower()
-        if loc in ['hà nội', 'ha noi']:
-            hanoi_list.append(person)
-        elif loc in ['đà nẵng', 'da nang']:
-            danang_list.append(person)
-        elif loc in ['thành phố hồ chí minh', 'hồ chí minh', 'ho chi minh']:
-            hcm_list.append(person)
-        else:
-            unknown_list.append(person)
-    
     # Filter and sort result by time submitting first quest
-    def _first_quest_date_str(person):
-        date = first_quest_date(person)
+    def _pp_1st_quest_date_str(person):
+        date = pp_1st_quest_date(person)
         return str(date) if date else 'z'  # Biggest string
-        
-    ok_list_by_time = list(ok_list)
-    ok_list_by_time.sort(key=lambda p: _first_quest_date_str(p))
-    hanoi_list_by_time = list(hanoi_list)
-    hanoi_list_by_time.sort(key=lambda p: _first_quest_date_str(p))
-    danang_list_by_time = list(danang_list)
-    danang_list_by_time.sort(key=lambda p: _first_quest_date_str(p))
-    hcm_list_by_time = list(hcm_list)
-    hcm_list_by_time.sort(key=lambda p: _first_quest_date_str(p))
     
-    INPUT_DATA['result'] = {
-        'error': error_list,
-        'ok': {
-            'all': ok_list,
-            'all_by_time': ok_list_by_time,
-            'hanoi': hanoi_list,
-            'hanoi_by_time': hanoi_list_by_time,
-            'danang': danang_list,
-            'danang_by_time': danang_list_by_time,
-            'hcm': hcm_list,
-            'hcm_by_time': hcm_list_by_time,
-            'unknown': unknown_list,
-        },
+    ok_list_by_time = list(ok_list)
+    ok_list_by_time.sort(key=lambda p: _pp_1st_quest_date_str(p))
+    
+    rank_by_location = {
+        'all': ok_list,
     }
-
+    rank_by_timestamp = {
+        'all': ok_list_by_time,
+    }
+    DATA['result'] = {
+        'error': error_list,
+        'rank_by_location': rank_by_location,
+        'rank_by_timestamp': rank_by_timestamp,
+    }
+    
+    # Filter and sort result by location/timestamp
+    filter_loc = FILTER['location']
+    for loc_name, loc_data in filter_loc.items():
+        rank_by_location[loc_name] = []
+        rank_by_timestamp[loc_name] = []
+    
+    for person in ok_list:
+        person_loc = person['location'].lower()
+        for loc_name, loc_data in filter_loc.items():
+            if person_loc in loc_data['names']:
+                rank_by_location[loc_name].append(person)
+                
+    for person in ok_list_by_time:
+        person_loc = person['location'].lower()
+        for loc_name, loc_data in filter_loc.items():
+            if person_loc in loc_data['names']:
+                rank_by_timestamp[loc_name].append(person)
+                
     # Show final result on screen
-    show_result_header(INPUT_DATA['result'])
+    show_result_header(DATA['result'])
     # Errors
     show_result_error(error_list)
-    # Result all location/time
-    show_result_by_loc('ALL LOCATION', ok_list)
-    show_result_by_time('ALL LOCATION (BY TIME SUBMITTING FIRST QUEST)', ok_list_by_time)
-    # Result by location/time
-    show_result_by_loc('HÀ NỘI', hanoi_list)
-    show_result_by_time('HÀ NỘI (BY TIME SUBMITTING FIRST QUEST)', hanoi_list_by_time)
-    show_result_by_loc('ĐÀ NẴNG', danang_list)
-    show_result_by_time('ĐÀ NẴNG (BY TIME SUBMITTING FIRST QUEST)', danang_list_by_time)
-    show_result_by_loc('HỒ CHÍ MINH', hcm_list)
-    show_result_by_time('HỒ CHÍ MINH (BY TIME SUBMITTING FIRST QUEST)', hcm_list_by_time)
-    show_result_by_loc('UNKNOWN LOCATION', unknown_list)
+    # Result all
+    show_result_by_loc('ALL LOCATIONS', ok_list)
+    show_result_by_time(
+        'ALL LOCATIONS (BY TIME SUBMITTING FIRST QUEST)',
+        ok_list_by_time)
+    # Result by location
+    for loc_name, loc_data in filter_loc.items():
+        show_result_by_loc(loc_data['title'].upper(), rank_by_location[loc_name])
+        show_result_by_time(
+            loc_data['title'].upper() + ' (BY TIME SUBMITTING FIRST QUEST)',
+            rank_by_timestamp[loc_name])
     
     # Save result to text file
     save_result_txt()
-    
-    # Save result to excel file also
-    save_result_excel()
-    
-    pp()
-    pp('RESULT saved in', fg.cyan + 'result.txt' + fx.end, 'and',
-       fg.cyan + 'result.xlsx' + fx.end)
 
-def first_quest_date(person):
-        quests = person['legal_quests']
-        quest = quests[0] if len(quests) else None
-        return quest['earned_date'] if quest else None
+def pp_1st_quest_date(person):
+    quests = person['legal_quests']
+    quest = quests[0] if len(quests) else None
+    return quest['earned_date'] if quest else None
         
+def show_email(person, txtmode=False):
+    email = person['email']
+    if OPTIONS['hidden_email']:
+        email = '******@' + email.split('@')[1]
+    return email if txtmode else cc(email, fg.cyan)
+
 def show_result_header(result, outfile=None):
     if not outfile:
-        pp()
-        pp()
-        pp(bg.lightyellow + fg.blue + fx.bold, 'FINAL RESULT', fx.end)
-        pp()
+        prt(EOL, EOL,
+            cc(INDENT_LV2+'HIGH SCORES'+INDENT_LV2, STYLE_INFO + fx.blink), EOL)
     else:
         outfile.write('\nGDG - CLOUD STUDY JAMS RESULT\n')
-        outfile.write('    Total participants: %d\n' % len(result['ok']['all']))
-        outfile.write('        Hà Nội: %d\n' % len(result['ok']['hanoi']))
-        outfile.write('        Đà Nẵng: %d\n' % len(result['ok']['danang']))
-        outfile.write('        Hồ Chí Minh: %d\n' % len(result['ok']['hcm']))
-        outfile.write('        Unknown location: %d\n' % len(result['ok']['unknown']))
-        outfile.write('    Time period:\n')
-        outfile.write('        From Date: %s\n' % str(QUEST_COUNT_FROM[0]))
-        outfile.write('        To Date: %s\n' % str(QUEST_COUNT_FROM[1]))
+        all_participants = len(result['rank_by_location']['all'])
+        outfile.write(INDENT_LV1 + 'Total participants: %d\n' % all_participants)
+        
+        filter_loc = FILTER['location']
+        count_all_loc = 0
+        for loc_name, loc_data in filter_loc.items():
+            count = len(result['rank_by_location'][loc_name])
+            count_all_loc += count
+            outfile.write(INDENT_LV2 + loc_data['title'] + ': ' + str(count) + '\n')
+        
+        count_unknown = all_participants - count_all_loc
+        outfile.write(INDENT_LV2 + 'Unknown location: %d\n' % count_unknown)
+        
+        outfile.write(INDENT_LV1 + 'Time period:\n')
+        outfile.write(INDENT_LV2 + 'From Date: %s\n' % str(FILTER['date_range'][0]))
+        outfile.write(INDENT_LV2 + 'To Date: %s\n' % str(FILTER['date_range'][1]))
         outfile.write('\n')
 
 def show_result_error(plist, outfile=None):
@@ -291,190 +339,152 @@ def show_result_error(plist, outfile=None):
         return
         
     if not outfile:
-        pp()
-        pp(bg.lightred + fg.white + fx.bold, 'ERRORS ENCOUNTERED', fx.end)
+        prt(EOL, cc('ERRORS', bg.lightred+fg.white+fx.bold))
         
         for person in plist:
-            pp()
-            pp_err(person['name'], '(' + fg.cyan + person['email'] + fx.end + ')',
-                   fg.red, person['error'], fx.end)
+            prt_err(EOL, person['name'], cc(person['error'], fg.red))
     else:
         ordinal = 0
-        outfile.write('\n' + 'ERRORS ENCOUNTERED' + '\n')
+        outfile.write('\n' + 'ERRORS' + '\n')
         for person in plist:
             ordinal += 1
-            outfile.write('  %d. %s (%s) - %s\n' % (
-                          ordinal, person['name'], person['email'],
+            outfile.write('  %d. %s - %s\n' % (
+                          ordinal, person['name'],
                           person['error']))
 
 def show_result_by_loc(title, plist, outfile=None):
     if not outfile:
-        pp()
-        pp()
-        pp(bg.magenta + fg.white + fx.bold, title, fx.end)
-        pp()
+        prt(EOL, cc(" %s " % title, STYLE_RANK_HEADER), EOL)
         
         ordinal = 0
         for person in plist:
             ordinal += 1
-            pp()
-            pp(bg.lightgreen + fg.yellow + fx.bold, 'QUEST BY LOC', fx.end,
-               person['name'], '(' + fg.cyan + person['email'] + fx.end + ')')
-            pp()
-            pp('      ', bg.lightwhite+fg.lightblue, '%2d.' % ordinal, fx.end,
-               bg.lightyellow+fg.green, '%3d LEGAL QUESTS' % len(person['legal_quests']), fx.end,
-               bg.lightyellow+fg.green, '%3d TOTAL QUESTS' % len(person['quests']), fx.end)
+            rank_style = STYLE_RANK_ACTIVE if ordinal <= 5 else STYLE_RANK
+            prt(EOL, INDENT_LV1, cc('%2d.' % ordinal, rank_style),
+                cc('%3d Legal ' % len(person['legal_quests']), STYLE_RANK_INFO),
+                cc('%3d Total ' % len(person['quests']), STYLE_RANK_INFO),
+                person['name'],)
+        prt(EOL)
     else:
         ordinal = 0
         outfile.write('\n' + title + '\n')
         for person in plist:
             ordinal += 1
-            outfile.write('  %d. %s (%s) - %d legal quests (%d total)\n' % (
-                          ordinal, person['name'], person['email'],
-                          len(person['legal_quests']), len(person['quests'])))
+            outfile.write(INDENT_LV1 + '%d. %s - %d Legal quests (%d Total)\n' % (
+                          ordinal, person['name'],
+                          len(person['legal_quests']),
+                          len(person['quests'])))
 
 def show_result_by_time(title, plist, outfile=None):
     if not outfile:
-        pp()
-        pp()
-        pp(bg.magenta + fg.white + fx.bold, title, fx.end)
-        pp()
+        prt(EOL, cc(" %s " % title, STYLE_RANK_HEADER), EOL)
         
         ordinal = 0
         for person in plist:
             ordinal += 1
-            pp()
-            pp(bg.lightgreen + fg.yellow + fx.bold, 'QUEST BY TIME', fx.end,
-               person['name'], '(' + fg.cyan + person['email'] + fx.end + ')')
-            pp()
-            pp('      ', bg.lightwhite+fg.lightblue, '%2d.' % ordinal, fx.end,
-               bg.lightyellow+fg.green, 'DATE SUBMITTED %s' % str(first_quest_date(person)), fx.end)
+            rank_style = STYLE_RANK_ACTIVE if ordinal <= 5 else STYLE_RANK
+            date = pp_1st_quest_date(person)
+            date_str = str(date) if date else 'N/A'
+            prt(EOL, INDENT_LV1,
+                cc('%2d.' % ordinal, rank_style),
+                cc(' Earliest Date %s ' % date_str, STYLE_RANK_INFO),
+                person['name'])
+        prt(EOL)
     else:
         ordinal = 0
         outfile.write('\n' + title + '\n')
         for person in plist:
             ordinal += 1
-            outfile.write('  %d. %s (%s) - Time submitted %s\n' % (
-                          ordinal, person['name'], person['email'],
-                          str(first_quest_date(person))))
+            outfile.write(INDENT_LV1 + '%d. %s - Earliest Date %s\n' % (
+                          ordinal, person['name'],
+                          str(pp_1st_quest_date(person))))
 
 def save_result_txt():
-    result = INPUT_DATA['result']
+    result = DATA['result']
     error_list = result['error']
-    ok_list = result['ok']['all']
-    hanoi_list = result['ok']['hanoi']
-    hanoi_list_by_time = result['ok']['hanoi_by_time']
-    danang_list = result['ok']['danang']
-    danang_list_by_time = result['ok']['danang_by_time']
-    hcm_list = result['ok']['hcm']
-    hcm_list_by_time = result['ok']['hcm_by_time']
-    unknown_list = result['ok']['unknown']
     
     # Outfile for saving result
     with io.open('result.txt', 'w', encoding='utf-8') as outfile:
         # Header
-        show_result_header(INPUT_DATA['result'], outfile=outfile)
+        show_result_header(result, outfile=outfile)
         # Errors
         show_result_error(error_list, outfile=outfile)
         # Result all location
-        show_result_by_loc('ALL LOCATION', ok_list, outfile=outfile)
-        # Result by location/time
-        show_result_by_loc('HÀ NỘI', hanoi_list, outfile=outfile)
-        show_result_by_time('HÀ NỘI (BY TIME SUBMITTING FIRST QUEST)', hanoi_list_by_time, outfile=outfile)
-        show_result_by_loc('ĐÀ NẴNG', danang_list, outfile=outfile)
-        show_result_by_time('ĐÀ NẴNG (BY TIME SUBMITTING FIRST QUEST)', danang_list_by_time, outfile=outfile)
-        show_result_by_loc('HỒ CHÍ MINH', hcm_list, outfile=outfile)
-        show_result_by_time('HỒ CHÍ MINH (BY TIME SUBMITTING FIRST QUEST)', hcm_list_by_time, outfile=outfile)
-        show_result_by_loc('UNKNOWN LOCATION', unknown_list, outfile=outfile)
-    
-def save_result_excel():
-    wb = INPUT_DATA['excel']['workbook']
-    sh = INPUT_DATA['excel']['worksheet']
-    
-    sh['%s1' % COL_RESULT_QUEST_COUNT] = 'LegalQuests'
-    sh['%s1' % COL_RESULT_ALL] = 'ResultALL'
-    sh['%s1' % COL_RESULT_HANOI] = 'Hà Nội'
-    sh['%s1' % COL_RESULT_DANANG] = 'Đà Nẵng'
-    sh['%s1' % COL_RESULT_HCM] = 'Hồ Chí minh'
-    
-    result = INPUT_DATA['result']['ok']
-    result_all = result['all']
-    for i in range(0, len(result_all)):
-        person = result_all[i]
-        sh['%s%d' % (COL_RESULT_QUEST_COUNT, person['row_id'])] = len(person['legal_quests'])
-        sh['%s%d' % (COL_RESULT_ALL, person['row_id'])] = i+1
-    result_hanoi = result['hanoi']
-    for i in range(0, len(result_hanoi)):
-        person = result_hanoi[i]
-        sh['%s%d' % (COL_RESULT_HANOI, person['row_id'])] = i+1
-    result_danang = result['danang']
-    for i in range(0, len(result_danang)):
-        person = result_danang[i]
-        sh['%s%d' % (COL_RESULT_DANANG, person['row_id'])] = i+1
-    result_hcm = result['hcm']
-    for i in range(0, len(result_hcm)):
-        person = result_hcm[i]
-        sh['%s%d' % (COL_RESULT_HCM, person['row_id'])] = i+1
-    # Save workbook
-    wb.save(INPUT_FILE)
+        show_result_by_loc('ALL LOCATIONS',
+            result['rank_by_location']['all'], outfile=outfile)
+        show_result_by_loc('ALL LOCATIONS (BY TIME SUBMITTING FIRST QUEST)',
+            result['rank_by_timestamp']['all'], outfile=outfile)
+        # Result per location
+        filter_loc = FILTER['location']
+        for loc_name, loc_data in filter_loc.items():
+            show_result_by_loc(loc_data['title'].upper(),
+                result['rank_by_location'][loc_name], outfile=outfile)
+            show_result_by_time(loc_data['title'].upper() +
+                ' (BY TIME SUBMITTING FIRST QUEST)',
+                result['rank_by_timestamp'][loc_name], outfile=outfile)
+
+    prt(EOL + cc('RESULT saved to ' + cc('result.txt', fg.cyan), STYLE_INFO))
 
 def count_quests_of(person):
     qwiklabs_link = person['qwiklabs_link']
     resp = requests.get(qwiklabs_link)
     if resp.status_code != 200:  # Not OK
-        pp('UNABLE to load QUESTS report for user %s' % person['email'])
+        prt_err('UNABLE to load QUESTS report for user %s' % person['email'])
         person['error'] = 'UNABLE to load QUESTS report page'
     else:
         html = bs4.BeautifulSoup(resp.content, features="html.parser")
-        div_all_quests = html.body.find_all('div', attrs={'class': 'public-profile__badge'})
+        div_all_quests = html.body.find_all('div',
+            attrs={'class': 'public-profile__badge'})
         if not div_all_quests:
-            pp_err('UNABLE to parse QUESTS report for user %s' % person['email'])
-            person['error'] = 'UNABLE to parse QUESTS report (seems no quests at all)'
+            # Person has no quest complete
+            pass
         else:
             quests_list = person['quests']
-            # pp('Quest count = %d' % len(div_all_quests))
+            # prt('Quest count = %d' % len(div_all_quests))
             for div in div_all_quests:
                 child_tags = []
                 for child in div.children:
                     if isinstance(child, bs4.element.Tag):
                         child_tags.append(child)
                 if len(child_tags) != 3:
-                    pp('UNEXPECTED quests report content')
+                    prt_err('UNEXPECTED quests report content')
                     person['error'] = 'UNEXPECTED quests report content'
                 else:
                     title = child_tags[1].text.strip()
                     date_str = child_tags[2].text.strip().split('\n')[1]
-                    date = datetime.datetime.strptime(date_str, '%b %d, %Y').date()
+                    date = datetime.datetime.strptime(date_str, DATE_FORMAT).date()
                     quest_info = {
                         'title': title,
                         'earned_date': date,
                     }
-                    # pp(quest_info)
+                    # prt(quest_info)
                     quests_list.append(quest_info)
-        # pp(quests_list)
-        show_quests_report_of(person)
-        # Count legal quests
-        legal_quests = []
-        for quest in person['quests']:
-            if (quest['title'] not in SKIP_QUESTS and
-                QUEST_COUNT_FROM[0] <= quest['earned_date'] <= QUEST_COUNT_FROM[1]):
-                legal_quests.append(quest)
-        person['legal_quests'] = legal_quests
-        
+            # prt(quests_list)
+            show_quests_report_of(person)
+            # Count legal quests
+            legal_quests = []
+            skip_quests = FILTER['skip_quests']
+            from_date, to_date = FILTER['date_range']
+            for quest in person['quests']:
+                if (quest['title'] not in skip_quests and
+                    (not from_date or from_date <= quest['earned_date']) and
+                    (not to_date or to_date >= quest['earned_date'])):
+                    legal_quests.append(quest)
+            person['legal_quests'] = legal_quests
 
 def show_quests_report_of(person):
     # Title line
-    pp()
-    pp(bg.lightgreen + fg.yellow + fx.bold, 'QUEST FOUND', fx.end,
-       person['name'], '(' + fg.cyan + person['email'] + fx.end + ') -',
-       str(len(person['quests'])), 'quests')
+    prt(EOL, cc('QUEST REPORT', bg.lightgreen+fg.yellow+fx.bold),
+        person['name'], '(' + show_email(person) + ') -',
+        str(len(person['quests'])), 'quests')
     # Show all quests
-    if SHOW_QUESTS_DETAIL:
+    console_width = int(TERM_SIZE[0] * 0.8)
+    if OPTIONS['show_quest_detail']:
         est_line_len = 0
         quests_at_line = []
         for quest in person['quests']:
             title = quest['title']
-            if len(title) + est_line_len <= MAX_LINE_LEN:
+            if len(title) + est_line_len <= console_width:
                 est_line_len += len(title)
                 quests_at_line.append(title)
             else:
@@ -487,13 +497,11 @@ def show_quests_report_of(person):
 def show_quests_at_line(person, quests_title):
     args = []
     for title in quests_title:
+        title = (' %s ' % title) if COLORED_MODE else ('[%s]' % title)
         bgc = random_bg()
         fgc = random_fg(bgc)
-        args.append(getattr(bg, bgc) + getattr(fg, fgc))
-        args.append(title)
-        args.append(fx.end)
-    pp()
-    pp('      ', *args)
+        args.append(cc(title, getattr(bg, bgc) + getattr(fg, fgc)))
+    prt(EOL+INDENT_LV1, *args)
 
 if __name__ == '__main__':
     main()

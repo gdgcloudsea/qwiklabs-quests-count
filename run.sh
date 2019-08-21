@@ -4,7 +4,7 @@ if [ -d venv ]; then
 else
     echo "-------------"
     echo "First time running this script may take time as it initializes env"
-    echo "Make sure you have PYTHON 3.7 in your PATH"
+    echo "Make sure you have PYTHON3 in your PATH (tested with python 3.7 only)"
     echo "Please wait a little bit ..."
     echo "-------------"
     
@@ -18,4 +18,4 @@ else
     pip install -r requirements.txt
 fi
 
-python main.py
+python main.py $@
