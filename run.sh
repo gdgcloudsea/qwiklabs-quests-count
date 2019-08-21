@@ -13,7 +13,7 @@ else
     echo "Install virtualenv"
     pip install virtualenv
     echo "Create virtual env"
-    virtualenv venv
+    virtualenv venv --python=python3
     echo "Activate virtual env"
     source venv/bin/activate
     echo "Install dependencies"
