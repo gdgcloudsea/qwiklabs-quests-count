@@ -9,11 +9,11 @@ Python 3.7
 ### Windows
 
 ```console
-./run.cmd
+./run.cmd [-h|--help] [args...]
 ```
 
 ### Linux
 
 ```console
-./run.sh
+./run.sh [-h|--help] [args...]
 ```
